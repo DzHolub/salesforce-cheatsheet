@@ -1,0 +1,70 @@
+name: Create Scratch Org for Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Branch to create scratch org from'
+        default: 'develop'
+        required: true
+        type: string
+
+jobs:
+  create-scratch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.inputs.branch_name }}
+          
+      - name: Install Salesforce CLI
+        run: |
+          npm install @salesforce/cli --location=global
+          echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
+          sf version  
+      
+      - name: Authenticate with Dev Hub
+        run: |
+          echo ${{ secrets.DEVHUB_TOKEN }} > sf_auth_url.txt
+          sf org login sfdx-url -f sf_auth_url.txt --alias DevHub --set-default-dev-hub
+          rm -f ./sf_auth_url.txt
+
+      - name: Create Scratch Org
+        run: |
+          sf org create scratch --definition-file config/project-scratch-def.json --duration-days 7 --alias dev_scratch_org --set-default --admin-email ${{ vars.DEFAULT_USER_DEV }}
+
+      - name: Deploy Source Data to Scratch Org
+        run: |
+          sf project deploy start --source-dir force-app
+          sf org assign permset --name [!!PERMSET_NAME_HERE!!]
+                    
+      - name: Create Users
+        run: |
+          sf org create user -a qa_user --definition-file config/user-def.json Username=${{ vars.DEFAULT_QA_USERNAME }} email=${{ vars.DEFAULT_USER_QA }} --set-unique-username
+          sf org create user -a regular_user --definition-file config/user-def.json Username=${{ vars.DEFAULT_REGULAR_USERNAME }} email=${{ vars.DEFAULT_USER_QA }} LastName=Regular profileName="Standard User" permsets="[!!PERMSET_DEVNAME_HERE!!]" --set-unique-username
+          sf org display user --target-org qa_user --json > qa_user_creds.json
+          sf org display user --target-org regular_user --json > regular_user_creds.json
+
+      - name: Create force.com Site
+        run: |
+          sf project deploy start --source-dir unpackaged-utils
+          qa_org_info=$(cat qa_user_creds.json)
+          org_id=$(echo "$qa_org_info" | jq -r '.result.orgId')
+          sf org assign permset --name Site_Webhook --on-behalf-of "scratch_test_site@${org_id}.org.force.com"
+          
+      - name: Provide User Credentials and Webhook Link
+        run: |
+          qa_user_info=$(cat qa_user_creds.json)
+          qa_username=$(echo "$qa_user_info" | jq -r '.result.username')
+          qa_password=$(echo "$qa_user_info" | jq -r '.result.password')
+          regular_user_info=$(cat regular_user_creds.json)
+          regular_username=$(echo "$regular_user_info" | jq -r '.result.username')
+          regular_password=$(echo "$regular_user_info" | jq -r '.result.password')
+          instance_url=$(echo "$regular_user_info" | jq -r '.result.instanceUrl')
+          instance_name=$(echo "$instance_url" | awk -F[/:] '{print $4}' | sed 's/.scratch.my.salesforce.com//')
+          rm -f ./qa_user_creds.json
+          rm -f ./regular_user_creds.json
+          echo "QA User Credentials: Username: $qa_username, Password: $qa_password"
+          echo "Regular User Credentials: Username: $regular_username, Password: $regular_password"
+          echo "Webhook Link: https://${instance_name}.scratch.my.salesforce-sites.com/services/apexrest/asgintegration/[!!EXPOSED_APEX_CLASS_ENDPOINT_NAME_HERE!!]"
